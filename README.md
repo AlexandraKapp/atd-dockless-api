@@ -1,6 +1,7 @@
 # dockless-api
 
-The Dockless API provides an interface for retrieving anonymized and aggregated [dockless mobility](https://austintexas.gov/docklessmobility) trip data in the City of Austin. This API supplies data to our interactive [Dockless Mobility Explorer](https://dockless.austintexas.io).
+Adapted from The [Dockless API of Austin](https://github.com/cityofaustin) for Berlin.
+Supplies data for [the interactive interface](https://github.com/AlexandraKapp/atd-dockless-dataviz).
 
 ## Table of Contents
 * [Installation](#Installation)
@@ -66,10 +67,3 @@ docker push cityofaustin/dockless-api
 ## API Reference
 
 [See here](reference.md)
-
-
-## Deployment
-
-Code in the `master` branch is automatically deployed to Amazon ECS (Elastic Container Service) which updates the Docker image and deploys the new code to all running containers via Fargate. Credit to @sergiogcx for setting up this deployment for our team!
-
-- [Password-protected link to AWS Console](https://us-east-1.console.aws.amazon.com/ecr/repositories/cityofaustin/dockless-api/?region=us-east-1)

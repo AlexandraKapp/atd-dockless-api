@@ -1,3 +1,5 @@
+*.vscode
+
 notes.md
 dist
 __pycache__

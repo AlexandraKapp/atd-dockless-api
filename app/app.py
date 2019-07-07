@@ -19,6 +19,7 @@ from sanic_cors import CORS, cross_origin
 from shapely.geometry import Point, shape, asPolygon, mapping, polygon
 from shapely.ops import cascaded_union
 
+import pandas as pd
 
 def spatial_index(features):
     # create spatial index of census tract features
@@ -47,20 +48,20 @@ def parse_flow(args):
         )
 
 
-def parse_mode(args):
-    if not args.get("mode"):
-        return "all"
-    elif args.get("mode").lower() == "all":
-        return "all"
-    elif args.get("mode").lower() == "scooter":
-        return "scooter"
-    elif args.get("mode").lower() == "bicycle":
-        return "bicycle"
-    else:
-        raise exceptions.ServerError(
-            "Unsupported mode specified. Must be either `scooter`, `bicycle`, or `all` (default).",
-            status_code=500,
-        )
+# def parse_mode(args):
+#     if not args.get("mode"):
+#         return "all"
+#     elif args.get("mode").lower() == "all":
+#         return "all"
+#     elif args.get("mode").lower() == "scooter":
+#         return "scooter"
+#     elif args.get("mode").lower() == "bicycle":
+#         return "bicycle"
+#     else:
+#         raise exceptions.ServerError(
+#             "Unsupported mode specified. Must be either `scooter`, `bicycle`, or `all` (default).",
+#             status_code=500,
+#         )
 
 
 def to_local_string(timestamp):
@@ -81,9 +82,7 @@ def to_local_string(timestamp):
     # so we have to append `.replace(tzinfo=pytz.utc)` to make it tz aware
     dt = datetime.utcfromtimestamp(timestamp).replace(tzinfo=pytz.utc)
 
-    # and now we can represent the time in local time
-    local = dt.astimezone(tz)
-
+    # and now we can represent the time in 
     # we lop off the tz info from the timestamp because we're going
     # to pass socrata a "local" naive timestamp (YYYY-MM-DDTHH:MM:SS)
     return local.isoformat()[0:19]
@@ -132,12 +131,14 @@ def get_intersect_features(query_geom, polygons, idx, id_property="cell_id"):
     # reduce intersection feature set with rtree (this tests polygon bbox intersection)
     for intersect_pos in idx.intersection(query_geom.bounds):
 
-        poly_id = list(polygons.keys())[intersect_pos]
-        poly = shape(polygons[poly_id]["geometry"])
+        poly_id = polygons[intersect_pos]
+        # poly = shape(polygons[poly_id]["geometry"])
+        poly= shape(polygons[intersect_pos]["geometry"])
+
 
         # check if poly actually interesects with request geom
         if query_geom.intersects(poly):
-            ids.append(polygons[poly_id]["properties"][id_property])
+            ids.append(polygons[intersect_pos]["properties"][id_property])
             polys.append(poly)
 
     return ids, polys
@@ -148,11 +149,11 @@ def get_flow_keys(flow):
     Bit of harcoding to map the flow to the corresponding dataset property
     """
     if flow == "origin":
-        flow_key_init = "census_geoid_start"
-        flow_key_end = "census_geoid_end"
+        flow_key_init = "cell_id_start"
+        flow_key_end = "cell_id_end"
     elif flow == "destination":
-        flow_key_init = "census_geoid_end"
-        flow_key_end = "census_geoid_start"
+        flow_key_init = "cell_id_end"
+        flow_key_end = "cell_id_start"
     else:
         # this should never happen because we validate the flow param when parsing
         # the request
@@ -193,7 +194,7 @@ def get_where_clause(flow_key_init, flow_key_end, intersect_id_string, **params)
     return where_clause
 
 
-def get_trips(intersect_ids, flow_keys, **params):
+def get_trips(data, intersect_ids, flow_keys, **params):
     """
     Given a list of census tract ids, extract trip count properties from the source polygon data.
     """
@@ -202,22 +203,24 @@ def get_trips(intersect_ids, flow_keys, **params):
     flow_key_init = flow_keys[0]
     flow_key_end = flow_keys[1]
 
-    # generate a string of single-quoted ids (as if for a SQL `IN ()` statement)
-    intersect_id_string = ", ".join([f"'{id_}'" for id_ in intersect_ids])
+    trip_count = data[data[flow_key_init] == intersect_ids[0]].groupby(flow_key_end).count()[flow_key_init]
+   
+        # # generate a string of single-quoted ids (as if for a SQL `IN ()` statement)
+        # intersect_id_string = ", ".join([f"'{id_}'" for id_ in intersect_ids])
 
-    where_clause = get_where_clause(
-        flow_key_init, flow_key_end, intersect_id_string, **params
-    )
+        # where_clause = get_where_clause(
+        #     flow_key_init, flow_key_end, intersect_id_string, **params
+        # )
 
-    query = f"SELECT count(*) AS trip_count, {flow_key_end} WHERE {where_clause} GROUP BY {flow_key_end} LIMIT 10000000"
+        # query = f"SELECT count(*) AS trip_count, {flow_key_end} WHERE {where_clause} GROUP BY {flow_key_end} LIMIT 10000000"
 
-    params = {"$query": query}
+        # params = {"$query": query}
 
-    res = requests.get(TRIPS_URL, params, timeout=90)
+        # res = requests.get(TRIPS_URL, params, timeout=90)
 
-    res.raise_for_status()
+        # res.raise_for_status()
 
-    return res.json()
+    return trip_count.to_dict()
 
 
 def build_geojson(polygons, trips, flow_key_start):
@@ -228,38 +231,46 @@ def build_geojson(polygons, trips, flow_key_start):
     geojson = {"type": "FeatureCollection", "features": []}
 
     for tract in trips:
-        tract_id = tract.get(flow_key_start)
-        feature = polygons.get(tract_id)
+        for poly in polygons:
+            if tract == poly["properties"]["cell_id"]:
+                feature = poly
 
-        count = int(tract.get("trip_count"))
+                count = int(trips[tract])
 
-        count_as_height = (
-            count / 5
-        )  # each 5 trips will equate to 1 meter of height on the map
+                count_as_height = (
+                    count / 5
+                )  # each 5 trips will equate to 1 meter of height on the map
 
-        feature["properties"]["trips"] = count
-        feature["properties"]["count_as_height"] = count_as_height
-        feature["properties"]["tract_id"] = int(tract_id)
-        feature["properties"]["trips"] = count
-        geojson["features"].append(feature)
+                feature["properties"]["trips"] = count
+                feature["properties"]["count_as_height"] = count_as_height
+                feature["properties"]["tract_id"] = int(tract)
+                geojson["features"].append(feature)
 
     return geojson
 
 
 def get_total_trips(trips):
-    return sum([int(trip["trip_count"]) for trip in trips])
+    return sum(trips.values())
 
 
 dirname = os.path.dirname(__file__)
-source = os.path.join(dirname, "data/census_tracts_2010_simplified_20pct_indexed.json")
+source = os.path.join(dirname, 'data/planungsraeume.json')
+# TODO: change time zone
 tz = pytz.timezone("US/Central")
 
 with open(source, "r") as fin:
 
-    TRIPS_URL = "https://data.austintexas.gov/resource/7d8e-dm7r.json"
+    #TRIPS_URL = "https://data.austintexas.gov/resource/7d8e-dm7r.json"
+    DATA_PATH = os.path.join(dirname, "data/formatted-bike-data.json")
+    data = pd.read_json(DATA_PATH, dtype=False)
 
     census_tracts = json.loads(fin.read())
-    idx = spatial_index(census_tracts[feature_id] for feature_id in census_tracts.keys())
+    
+    #plr = {}
+    #for features in census_tracts['features']:
+    #    plr[features['properties']['cell_id']] = features['geometry']
+    
+    idx = spatial_index(feature for feature in census_tracts['features'])
     app = Sanic(__name__)
     CORS(app)
 
@@ -270,25 +281,24 @@ async def trip_handler(request):
 
     flow_keys = get_flow_keys(flow)
 
-    mode = parse_mode(request.args)
+    # mode = parse_mode(request.args)
 
     params = {
         "start_time": to_local_string(request.args.get("start_time")),
-        "end_time": to_local_string(request.args.get("end_time")),
-        "mode": mode,
+        "end_time": to_local_string(request.args.get("end_time"))
     }
 
     coords = parse_coordinates(request.args)
 
     query_geom = get_query_geom(coords)
 
-    intersect_ids, intersect_polys = get_intersect_features(query_geom, census_tracts, idx)
+    intersect_ids, intersect_polys = get_intersect_features(query_geom, census_tracts['features'], idx)
 
-    trips = get_trips(intersect_ids, flow_keys, **params)
+    trips = get_trips(data, intersect_ids, flow_keys, **params)
 
     response_data = {}
 
-    response_data["features"] = build_geojson(census_tracts, trips, flow_keys[1])
+    response_data["features"] = build_geojson(census_tracts['features'], trips, flow_keys[1])
 
     response_data["total_trips"] = get_total_trips(trips)
 
@@ -322,4 +332,4 @@ async def ignore_404s(request, exception):
 # TODO: a good reason for removing it
 #
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    app.run(host="localhost", port=8000, debug=True)
